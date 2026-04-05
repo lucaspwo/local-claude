@@ -121,7 +121,7 @@ All settings are via environment variables — no config files needed.
 | `MODELS_DIR` | `~/Models/gguf` | Directory containing .gguf model files |
 | `LLAMA_DRAFT` | *(auto-detected)* | Explicit path to draft model for speculative decoding |
 | `REMOTE_SSH_HOST` | `Ancalagon_WSL2-Tailnet` | SSH host for `remote-llama` backend |
-| `REMOTE_MODELS_DIR` | `/mnt/c/Users/lucas/Models/gguf` | GGUF directory on the remote host |
+| `REMOTE_MODELS_DIR` | `/mnt/e/Models/gguf` | GGUF directory on the remote host (WSL2 path) |
 
 ### Examples
 

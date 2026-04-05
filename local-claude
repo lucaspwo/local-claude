@@ -203,7 +203,7 @@ else:
 # --- Backend: remote-llama (manage llama-server on a remote host via SSH) ---
 elif [[ "$BACKEND" == "remote-llama" ]]; then
   REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-Ancalagon_WSL2-Tailnet}"
-  REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:-/mnt/c/Users/lucas/Models/gguf}"
+  REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:-/mnt/e/Models/gguf}"
   LLAMA_PORT="${LCC_PORT:-8091}"
   # Resolve the remote host's IP for curl (use SSH config hostname or LCC_HOST)
   LCC_HOST="${LCC_HOST:-100.91.10.23}"
@@ -248,7 +248,7 @@ elif [[ "$BACKEND" == "remote-llama" ]]; then
   fi
 
   # Convert WSL path to Windows path for llama-server.exe
-  GGUF_WIN=$(echo "$GGUF" | sed 's|^/mnt/c/|C:\\|' | sed 's|/|\\|g')
+  GGUF_WIN=$(echo "$GGUF" | sed -E 's|^/mnt/([a-z])/|\U\1:\\|' | sed 's|/|\\|g')
   MODEL_NAME=$(basename "$GGUF" .gguf | sed -E 's/-00001-of-[0-9]+//')
 
   # Collect all remote GGUF files for draft model detection
@@ -286,7 +286,7 @@ if candidates:
 " 2>/dev/null)
 
   if [[ -n "$DRAFT" ]]; then
-    DRAFT_WIN=$(echo "$DRAFT" | sed 's|^/mnt/c/|C:\\|' | sed 's|/|\\|g')
+    DRAFT_WIN=$(echo "$DRAFT" | sed -E 's|^/mnt/([a-z])/|\U\1:\\|' | sed 's|/|\\|g')
     echo "Draft model (speculative): $(basename "$DRAFT")" >&2
     DRAFT_ARGS="--model-draft \"${DRAFT_WIN}\" --draft-max 16"
   fi
