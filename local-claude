@@ -248,7 +248,7 @@ elif [[ "$BACKEND" == "remote-llama" ]]; then
   fi
 
   # Convert WSL path (/mnt/x/...) to Windows path (X:\...)
-  wsl_to_win() { echo "$1" | sed -E 's|^/mnt/([a-z])/|\1:\\|' | sed 's|/|\\|g' | sed -E 's|^([a-z]):\\|\u&|' | python3 -c "import sys; p=sys.stdin.read().strip(); print(p[0].upper()+p[1:])"; }
+  wsl_to_win() { echo "$1" | sed -E 's|^/mnt/([a-z])/|\1:\\|' | sed 's|/|\\|g' | python3 -c "import sys; p=sys.stdin.read().strip(); print(p[0].upper()+p[1:])"; }
   GGUF_WIN=$(wsl_to_win "$GGUF")
   MODEL_NAME=$(basename "$GGUF" .gguf | sed -E 's/-00001-of-[0-9]+//')
 
