@@ -39,7 +39,7 @@ The script:
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USER/local-claude.git
+git clone https://github.com/lucaspwo/local-claude.git
 cd local-claude
 
 # Copy script to PATH
