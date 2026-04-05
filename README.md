@@ -244,21 +244,134 @@ Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size
 
 ## Setting up a remote Windows host with NVIDIA GPU
 
-Quick guide to set up a Windows PC as a remote llama.cpp server:
+Complete step-by-step guide to set up a Windows PC as a remote llama.cpp inference server. This was tested with an NVIDIA RTX 4070 Ti SUPER (16 GB VRAM) and Qwen2.5 models.
 
-1. **Download llama.cpp** prebuilt binaries with CUDA from [releases](https://github.com/ggml-org/llama.cpp/releases):
-   - `llama-<version>-bin-win-cuda-12.4-x64.zip` (main binary)
-   - `cudart-llama-bin-win-cuda-12.4-x64.zip` (CUDA runtime)
+### 1. Enable SSH access
 
-2. **Extract both** to the same directory (e.g., `C:\Users\you\llama.cpp\bin\`)
+The `remote-llama` backend SSHes into **WSL2** on the Windows host (not native Windows SSH), because it needs to run `llama-server.exe` from a Unix shell while passing Windows-style paths.
 
-3. **Download GGUF models** to a models directory (e.g., `C:\Users\you\Models\gguf\`)
+- Install WSL2 on the Windows host: `wsl --install` (from an admin PowerShell)
+- Install an SSH server inside WSL2: `sudo apt install openssh-server`
+- Start the SSH server: `sudo service ssh start`
+- Configure it to listen on a different port (e.g., 2222) to avoid conflict with Windows' own SSH:
+  ```bash
+  # In WSL2: edit /etc/ssh/sshd_config, set Port 2222
+  sudo service ssh restart
+  ```
+- On the client machine, add an entry to `~/.ssh/config`:
+  ```
+  Host my-remote-pc
+    HostName <IP or Tailscale address>
+    Port 2222
+    User <wsl-username>
+    IdentityFile ~/.ssh/id_ed25519
+  ```
+- Test: `ssh my-remote-pc "uname -a"` — should show a Linux kernel
 
-4. **Enable SSH** on Windows (Settings → Optional Features → OpenSSH Server) or use WSL2
+### 2. Download llama.cpp (prebuilt, no compilation needed)
 
-5. **Configure SSH** on your client machine (`~/.ssh/config`) and set `REMOTE_SSH_HOST`
+From the WSL2 shell on the remote host, or via SSH:
 
-6. **Run** `local-claude --backend remote-llama`
+```bash
+# Create directories
+mkdir -p /mnt/c/llama.cpp/bin
+mkdir -p /mnt/d/Models/gguf   # Use a drive with enough space
+
+# Download latest release (check https://github.com/ggml-org/llama.cpp/releases)
+VERSION="b8668"  # Replace with latest
+cd /tmp
+
+# Main binary (CUDA 12.4 — works with most modern NVIDIA drivers)
+wget "https://github.com/ggml-org/llama.cpp/releases/latest/download/llama-${VERSION}-bin-win-cuda-12.4-x64.zip"
+
+# CUDA runtime DLLs (required — not included in the main binary)
+wget "https://github.com/ggml-org/llama.cpp/releases/latest/download/cudart-llama-bin-win-cuda-12.4-x64.zip"
+
+# Extract BOTH to the SAME directory
+cd /mnt/c/llama.cpp/bin
+unzip /tmp/llama-${VERSION}-bin-win-cuda-12.4-x64.zip
+unzip /tmp/cudart-llama-bin-win-cuda-12.4-x64.zip
+```
+
+> **Critical:** You must extract **both** zips to the same directory. The main binary contains `ggml-cuda.dll` but it depends on `cudart64_12.dll`, `cublas64_12.dll`, and `cublasLt64_12.dll` from the cudart zip. Without them, llama-server silently falls back to CPU-only inference.
+
+Verify CUDA is detected:
+```bash
+cd /mnt/c/llama.cpp/bin
+./llama-server.exe --help 2>&1 | head -5
+# Should show: "ggml_cuda_init: found 1 CUDA devices"
+# If it only shows "load_backend: loaded CPU backend", the CUDA DLLs are missing
+```
+
+### 3. Download GGUF models
+
+Download models from [Hugging Face](https://huggingface.co/models?search=gguf). For Qwen2.5 with speculative decoding:
+
+```bash
+MODELS=/mnt/d/Models/gguf  # Adjust to your drive
+
+# Main model — Qwen2.5-7B-Instruct Q8_0 (~8 GB, fits in 16 GB VRAM)
+# Note: this model is split into 3 files, download ALL of them
+for i in 1 2 3; do
+  curl -L -o "$MODELS/qwen2.5-7b-instruct-q8_0-0000${i}-of-00003.gguf" \
+    "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q8_0-0000${i}-of-00003.gguf"
+done
+
+# Draft model — Qwen2.5-0.5B-Instruct Q8_0 (~645 MB, for speculative decoding)
+curl -L -o "$MODELS/qwen2.5-0.5b-instruct-q8_0.gguf" \
+  "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf"
+
+# Optional: other sizes
+# 3B Q4_K_M (~2 GB) — fast, lower quality
+curl -L -o "$MODELS/qwen2.5-3b-instruct-q4_k_m.gguf" \
+  "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+
+# 14B Q4_K_M (~9 GB, split) — better quality, tight fit in 16 GB VRAM
+for i in 1 2 3; do
+  curl -L -o "$MODELS/qwen2.5-14b-instruct-q4_k_m-0000${i}-of-00003.gguf" \
+    "https://huggingface.co/Qwen/Qwen2.5-14B-Instruct-GGUF/resolve/main/qwen2.5-14b-instruct-q4_k_m-0000${i}-of-00003.gguf"
+done
+```
+
+> **Tip:** Keep llama.cpp binaries on the fastest SSD (for DLL loading), but models can live on a slower drive — they're read sequentially into VRAM at startup and not accessed from disk again.
+
+### 4. Configure the client
+
+On your local machine (the one running Claude Code), set the environment variables. Best done in your shell profile:
+
+```bash
+# ~/.zshrc or ~/.bashrc
+export REMOTE_SSH_HOST="my-remote-pc"               # SSH config host name
+export REMOTE_MODELS_DIR="/mnt/d/Models/gguf"        # WSL2 path to models on remote
+export REMOTE_LLAMA_DIR="/mnt/c/llama.cpp/bin"       # WSL2 path to llama-server on remote
+export LCC_HOST="10.0.0.5"                           # IP of remote host (reachable from client)
+```
+
+Then run:
+```bash
+local-claude --backend remote-llama
+```
+
+### 5. Gotchas we discovered
+
+- **Port 8090 may be in use** by Windows services (`svchost.exe`). The script defaults to **8091** to avoid this. If that's also taken, set `LCC_PORT` to another value.
+- **CUDA toolkit is NOT required.** The prebuilt binaries include everything needed. Only the NVIDIA display driver must be installed on the Windows host.
+- **WSL2 paths vs Windows paths:** The script converts automatically (e.g., `/mnt/d/Models/...` → `D:\Models\...`). You always use WSL2 paths in the env vars.
+- **Disk space:** Check free space before downloading models. A full C: drive causes `curl: (23) Failure writing output to destination` errors without clear explanation.
+- **Split GGUF files:** Some models (7B Q8_0, 14B Q4_K_M) are split into multiple files on Hugging Face. Download **all** parts. The script auto-detects them and only shows the model name once in the selection menu.
+- **Firewall:** Windows Firewall may block incoming connections to `llama-server.exe`. Allow it when prompted, or add a firewall rule for the port.
+
+### VRAM sizing guide
+
+| Model | Quantization | VRAM (approx) | Quality | Fits 8 GB | Fits 16 GB | Fits 24 GB |
+|---|---|---|---|---|---|---|
+| 0.5B | Q8_0 | ~0.7 GB | Draft only | ✅ | ✅ | ✅ |
+| 3B | Q4_K_M | ~2.5 GB | Basic | ✅ | ✅ | ✅ |
+| 7B | Q8_0 | ~9.3 GB | Good | ❌ | ✅ | ✅ |
+| 14B | Q4_K_M | ~10 GB | Better | ❌ | ✅ | ✅ |
+| 14B | Q8_0 | ~16 GB | Best 14B | ❌ | ⚠️ tight | ✅ |
+
+> The draft model (0.5B) adds ~0.7 GB on top. With a 7B Q8_0 + 0.5B draft, total VRAM is ~10 GB.
 
 ## Credits
 
