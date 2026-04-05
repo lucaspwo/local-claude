@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # local-claude — wrapper to run Claude Code with local LLMs
-# Usage: local-claude [--backend lmstudio|llama] [claude arguments...]
+# Usage: local-claude [--backend lmstudio|llama|remote|remote-llama] [--host HOST] [--port PORT] [claude arguments...]
 #
 # Backends:
-#   lmstudio  — connects to a running LM Studio server (default port 1234)
-#   llama     — starts llama-server with an interactively chosen GGUF model
+#   lmstudio      — connects to a running LM Studio server (default port 1234)
+#   llama         — starts llama-server with an interactively chosen GGUF model
+#   remote        — connects to an already-running remote OpenAI-compatible server
+#   remote-llama  — starts llama-server on a remote host via SSH, manages lifecycle
 #
 # Environment variables:
-#   LCC_HOST      — LM Studio host (default: 127.0.0.1)
-#   LCC_PORT      — LM Studio port (default: 1234)
-#   LLAMA_PORT    — llama.cpp server port (default: 8090)
-#   LLAMA_DRAFT   — explicit path to a draft model for speculative decoding
-#   LLAMA_SERVER  — path to llama-server binary
-#   MODELS_DIR    — path to directory containing .gguf files
+#   LCC_HOST        — LM Studio / remote server host (default: 127.0.0.1)
+#   LCC_PORT        — LM Studio / remote server port (default: 1234)
+#   LLAMA_PORT      — llama.cpp server port (default: 8091)
+#   LLAMA_DRAFT     — explicit path to a draft model for speculative decoding
+#   LLAMA_SERVER    — path to llama-server binary (local or remote)
+#   MODELS_DIR      — path to directory containing .gguf files (local or remote)
+#   REMOTE_SSH_HOST — SSH host for remote-llama backend (default: Ancalagon_WSL2-Tailnet)
 
 set -euo pipefail
 
@@ -26,6 +29,17 @@ if [[ "${1:-}" == "--backend" ]]; then
   BACKEND="$2"
   shift 2
 fi
+
+# --- Parse --host and --port overrides ---
+while [[ "${1:-}" == "--host" || "${1:-}" == "--port" ]]; do
+  if [[ "$1" == "--host" ]]; then
+    LCC_HOST="$2"
+    shift 2
+  elif [[ "$1" == "--port" ]]; then
+    LCC_PORT="$2"
+    shift 2
+  fi
+done
 
 pick_from_tty() {
   local prompt="$1"
@@ -186,9 +200,200 @@ else:
   echo "Server: ${BASE_URL} (LM Studio)"
   echo "---"
 
+# --- Backend: remote-llama (manage llama-server on a remote host via SSH) ---
+elif [[ "$BACKEND" == "remote-llama" ]]; then
+  REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-Ancalagon_WSL2-Tailnet}"
+  REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:-/mnt/c/Users/lucas/Models/gguf}"
+  LLAMA_PORT="${LCC_PORT:-8091}"
+  # Resolve the remote host's IP for curl (use SSH config hostname or LCC_HOST)
+  LCC_HOST="${LCC_HOST:-100.91.10.23}"
+  BASE_URL="http://${LCC_HOST}:${LLAMA_PORT}"
+
+  # List GGUF models on remote host
+  REMOTE_FILES=$(ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
+    "find '${REMOTE_MODELS_DIR}' -name '*.gguf' -type f 2>/dev/null | sort" 2>/dev/null)
+
+  if [[ -z "$REMOTE_FILES" ]]; then
+    echo "Error: no .gguf files found on ${REMOTE_SSH_HOST}:${REMOTE_MODELS_DIR}" >&2
+    exit 1
+  fi
+
+  # Filter to main models only (exclude split parts 0000{2,3,...})
+  MAIN_FILES=()
+  while IFS= read -r f; do
+    if [[ "$f" =~ -[0-9]+-of-[0-9]+\.gguf$ ]]; then
+      # Split GGUF — only include the first part
+      [[ "$f" =~ -00001-of- ]] && MAIN_FILES+=("$f")
+    else
+      MAIN_FILES+=("$f")
+    fi
+  done <<< "$REMOTE_FILES"
+
+  if [[ ${#MAIN_FILES[@]} -eq 0 ]]; then
+    echo "Error: no usable .gguf models found on remote host" >&2
+    exit 1
+  fi
+
+  if [[ ${#MAIN_FILES[@]} -eq 1 ]]; then
+    GGUF="${MAIN_FILES[0]}"
+  else
+    echo "Available models on ${REMOTE_SSH_HOST}:" >&2
+    for i in "${!MAIN_FILES[@]}"; do
+      display_name=$(basename "${MAIN_FILES[$i]}" | sed -E 's/-00001-of-[0-9]+//')
+      echo "  [$((i+1))] ${display_name}" >&2
+    done
+    choice=$(pick_from_tty "Choose [1]: ")
+    choice="${choice:-1}"
+    GGUF="${MAIN_FILES[$((choice-1))]}"
+  fi
+
+  # Convert WSL path to Windows path for llama-server.exe
+  GGUF_WIN=$(echo "$GGUF" | sed 's|^/mnt/c/|C:\\|' | sed 's|/|\\|g')
+  MODEL_NAME=$(basename "$GGUF" .gguf | sed -E 's/-00001-of-[0-9]+//')
+
+  # Collect all remote GGUF files for draft model detection
+  ALL_REMOTE_FILES=()
+  while IFS= read -r f; do
+    ALL_REMOTE_FILES+=("$f")
+  done <<< "$REMOTE_FILES"
+
+  # Speculative decoding: find the smallest model from the same family
+  DRAFT_ARGS=""
+  MODEL_FAMILY=$(basename "$GGUF" | sed -E 's/[-_]?[0-9]+[bB].*//i' | tr '[:upper:]' '[:lower:]')
+  DRAFT=$(python3 -c "
+import os, re, sys
+gguf = '$GGUF'
+family = '$MODEL_FAMILY'
+candidates = []
+files = '''$(printf '%s\n' "${ALL_REMOTE_FILES[@]}")'''
+for f in files.strip().split('\n'):
+    f = f.strip()
+    if not f or f == gguf:
+        continue
+    # Skip split parts that aren't the first
+    if re.search(r'-000(?!01)\d+-of-\d+\.gguf$', f):
+        continue
+    name = os.path.basename(f).lower()
+    f_family = re.sub(r'[-_]?[0-9]+\.?[0-9]*b.*', '', name, flags=re.I)
+    if f_family != family:
+        continue
+    match = re.search(r'(\d+\.?\d*)b', name, re.I)
+    if match:
+        candidates.append((float(match.group(1)), f))
+if candidates:
+    candidates.sort(key=lambda x: x[0])
+    print(candidates[0][1])
+" 2>/dev/null)
+
+  if [[ -n "$DRAFT" ]]; then
+    DRAFT_WIN=$(echo "$DRAFT" | sed 's|^/mnt/c/|C:\\|' | sed 's|/|\\|g')
+    echo "Draft model (speculative): $(basename "$DRAFT")" >&2
+    DRAFT_ARGS="--model-draft \"${DRAFT_WIN}\" --draft-max 16"
+  fi
+
+  # Stop any existing llama-server on the remote host
+  if curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
+    echo "llama-server already running on ${BASE_URL}, stopping..." >&2
+    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
+      "pkill -f 'llama-server.*--port ${LLAMA_PORT}'" 2>/dev/null || true
+    sleep 2
+  fi
+
+  echo "Starting llama-server on ${REMOTE_SSH_HOST} with: ${MODEL_NAME}" >&2
+
+  # Start llama-server on the remote host via SSH
+  ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "
+    cd /mnt/c/Users/lucas/llama.cpp/bin && \
+    nohup ./llama-server.exe \
+      --model \"${GGUF_WIN}\" \
+      ${DRAFT_ARGS} \
+      --port ${LLAMA_PORT} \
+      --host 0.0.0.0 \
+      --ctx-size 32768 \
+      --n-gpu-layers 99 \
+      > /tmp/llama-server.log 2>&1 &
+    echo \$!
+  " > /tmp/remote-llama-pid.txt 2>/dev/null
+
+  REMOTE_PID=$(cat /tmp/remote-llama-pid.txt | tr -d '[:space:]')
+
+  # Kill remote llama-server when this script exits
+  trap "echo 'Stopping remote llama-server...' >&2; ssh -o ConnectTimeout=5 '$REMOTE_SSH_HOST' 'kill $REMOTE_PID 2>/dev/null; pkill -f \"llama-server.*--port ${LLAMA_PORT}\" 2>/dev/null' || true" EXIT
+
+  # Wait for server to be ready
+  echo "Waiting for server..." >&2
+  for i in $(seq 1 60); do
+    if curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
+    echo "Error: remote llama-server did not respond after 60s." >&2
+    echo "Remote log:" >&2
+    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "tail -20 /tmp/llama-server.log" 2>/dev/null >&2
+    exit 1
+  fi
+
+  # Get the actual model ID from the API
+  MODELS_JSON=$(curl -sf "${BASE_URL}/v1/models")
+  MODEL=$(python3 -c "
+import json, sys
+data = json.loads('''${MODELS_JSON}''')
+models = data.get('data', [])
+if models:
+    print(models[0]['id'])
+" 2>/dev/null)
+
+  echo "Model: $MODEL"
+  echo "Server: ${BASE_URL} (remote-llama on ${REMOTE_SSH_HOST}, PID ${REMOTE_PID})"
+  echo "---"
+
+# --- Backend: remote (connect to an existing llama.cpp / OpenAI-compatible server) ---
+elif [[ "$BACKEND" == "remote" ]]; then
+  LCC_HOST="${LCC_HOST:-127.0.0.1}"
+  LCC_PORT="${LCC_PORT:-8091}"
+  BASE_URL="http://${LCC_HOST}:${LCC_PORT}"
+
+  if ! curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
+    echo "Error: remote server not responding at ${BASE_URL}" >&2
+    exit 1
+  fi
+
+  MODELS_JSON=$(curl -sf "${BASE_URL}/v1/models")
+
+  MODEL=$(python3 -c "
+import json, sys
+data = json.loads('''${MODELS_JSON}''')
+models = [m for m in data.get('data', []) if not m['id'].startswith('text-embedding')]
+if not models:
+    sys.exit(1)
+if len(models) == 1:
+    print(models[0]['id'])
+else:
+    tty = open('/dev/tty', 'r')
+    print('Available models:', file=sys.stderr)
+    for i, m in enumerate(models):
+        print(f'  [{i+1}] {m[\"id\"]}', file=sys.stderr)
+    print('Choose [1]: ', end='', file=sys.stderr, flush=True)
+    choice = tty.readline().strip() or '1'
+    tty.close()
+    print(models[int(choice)-1]['id'])
+")
+
+  if [[ -z "$MODEL" ]]; then
+    echo "Error: no models loaded on remote server." >&2
+    exit 1
+  fi
+
+  echo "Model: $MODEL"
+  echo "Server: ${BASE_URL} (remote)"
+  echo "---"
+
 else
   echo "Unknown backend: $BACKEND" >&2
-  echo "Usage: local-claude [--backend lmstudio|llama]" >&2
+  echo "Usage: local-claude [--backend lmstudio|llama|remote] [--host HOST] [--port PORT]" >&2
   exit 1
 fi
 
@@ -202,7 +407,7 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CONFIG_DIR="${HOME}/.claude-local"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
-if [[ -n "${LLAMA_PID:-}" ]]; then
+if [[ -n "${LLAMA_PID:-}" || -n "${REMOTE_PID:-}" ]]; then
   # Don't exec — keep bash alive so the EXIT trap can kill llama-server
   claude --model "$MODEL" "$@"
 else
