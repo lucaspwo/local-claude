@@ -39,7 +39,7 @@ The script:
 
 ```bash
 # Clone
-git clone https://github.com/lucaspwo/local-claude.git
+git clone https://github.com/YOUR_USER/local-claude.git
 cd local-claude
 
 # Copy script to PATH
@@ -120,8 +120,9 @@ All settings are via environment variables — no config files needed.
 | `LLAMA_SERVER` | `~/git/llama.cpp/build/bin/llama-server` | Path to llama-server binary |
 | `MODELS_DIR` | `~/Models/gguf` | Directory containing .gguf model files |
 | `LLAMA_DRAFT` | *(auto-detected)* | Explicit path to draft model for speculative decoding |
-| `REMOTE_SSH_HOST` | `Ancalagon_WSL2-Tailnet` | SSH host for `remote-llama` backend |
-| `REMOTE_MODELS_DIR` | `/mnt/e/Models/gguf` | GGUF directory on the remote host (WSL2 path) |
+| `REMOTE_SSH_HOST` | *(required)* | SSH host for `remote-llama` backend |
+| `REMOTE_MODELS_DIR` | *(required)* | GGUF directory on the remote host (WSL2 path, e.g., `/mnt/d/Models/gguf`) |
+| `REMOTE_LLAMA_DIR` | *(required)* | llama-server directory on the remote host (WSL2 path, e.g., `/mnt/c/llama.cpp/bin`) |
 
 ### Examples
 
@@ -132,8 +133,12 @@ LCC_HOST=192.168.0.62 local-claude
 # Use a specific draft model
 LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend llama
 
-# Remote llama.cpp with custom SSH host
-REMOTE_SSH_HOST=myserver local-claude --backend remote-llama
+# Remote llama.cpp via SSH (all 4 vars are required)
+REMOTE_SSH_HOST=myserver \
+REMOTE_MODELS_DIR=/mnt/d/Models/gguf \
+REMOTE_LLAMA_DIR=/mnt/c/llama.cpp/bin \
+LCC_HOST=10.0.0.5 \
+local-claude --backend remote-llama
 
 # Connect to a pre-running remote server
 local-claude --backend remote --host 10.0.0.5 --port 8091

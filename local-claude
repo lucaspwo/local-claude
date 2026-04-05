@@ -15,7 +15,9 @@
 #   LLAMA_DRAFT     — explicit path to a draft model for speculative decoding
 #   LLAMA_SERVER    — path to llama-server binary (local or remote)
 #   MODELS_DIR      — path to directory containing .gguf files (local or remote)
-#   REMOTE_SSH_HOST — SSH host for remote-llama backend (default: Ancalagon_WSL2-Tailnet)
+#   REMOTE_SSH_HOST    — SSH host for remote-llama backend (required)
+#   REMOTE_MODELS_DIR  — GGUF directory on the remote host (required)
+#   REMOTE_LLAMA_DIR   — llama-server directory on the remote host (required for WSL2)
 
 set -euo pipefail
 
@@ -202,11 +204,11 @@ else:
 
 # --- Backend: remote-llama (manage llama-server on a remote host via SSH) ---
 elif [[ "$BACKEND" == "remote-llama" ]]; then
-  REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-Ancalagon_WSL2-Tailnet}"
-  REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:-/mnt/e/Models/gguf}"
+  REMOTE_SSH_HOST="${REMOTE_SSH_HOST:?Set REMOTE_SSH_HOST to the SSH hostname of the remote machine}"
+  REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:?Set REMOTE_MODELS_DIR to the GGUF directory on the remote host}"
+  REMOTE_LLAMA_DIR="${REMOTE_LLAMA_DIR:?Set REMOTE_LLAMA_DIR to the llama-server directory on the remote host (WSL2 path)}"
   LLAMA_PORT="${LCC_PORT:-8091}"
-  # Resolve the remote host's IP for curl (use SSH config hostname or LCC_HOST)
-  LCC_HOST="${LCC_HOST:-100.91.10.23}"
+  LCC_HOST="${LCC_HOST:?Set LCC_HOST to the remote host IP reachable from this machine}"
   BASE_URL="http://${LCC_HOST}:${LLAMA_PORT}"
 
   # List GGUF models on remote host
@@ -304,7 +306,7 @@ if candidates:
 
   # Start llama-server on the remote host via SSH
   ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "
-    cd /mnt/c/Users/lucas/llama.cpp/bin && \
+    cd '${REMOTE_LLAMA_DIR}' && \
     nohup ./llama-server.exe \
       --model \"${GGUF_WIN}\" \
       ${DRAFT_ARGS} \
