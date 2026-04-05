@@ -9,8 +9,8 @@
 #   remote-llama  — starts llama-server on a remote host via SSH, manages lifecycle
 #
 # Environment variables:
-#   LCC_HOST        — LM Studio / remote server host (default: 127.0.0.1)
-#   LCC_PORT        — LM Studio / remote server port (default: 1234)
+#   LCC_HOST        — remote server host IP (used by remote/remote-llama backends)
+#   LCC_PORT        — remote server port (default: 1234 for lmstudio, 8091 for others)
 #   LLAMA_PORT      — llama.cpp server port (default: 8091)
 #   LLAMA_DRAFT     — explicit path to a draft model for speculative decoding
 #   LLAMA_SERVER    — path to llama-server binary (local or remote)
@@ -33,12 +33,14 @@ if [[ "${1:-}" == "--backend" ]]; then
 fi
 
 # --- Parse --host and --port overrides ---
+CLI_HOST=""
+CLI_PORT=""
 while [[ "${1:-}" == "--host" || "${1:-}" == "--port" ]]; do
   if [[ "$1" == "--host" ]]; then
-    LCC_HOST="$2"
+    CLI_HOST="$2"
     shift 2
   elif [[ "$1" == "--port" ]]; then
-    LCC_PORT="$2"
+    CLI_PORT="$2"
     shift 2
   fi
 done
@@ -127,7 +129,7 @@ if candidates:
     --model "$GGUF" \
     ${DRAFT_ARGS[@]+"${DRAFT_ARGS[@]}"} \
     --port "$LLAMA_PORT" \
-    --ctx-size 32768 \
+    --ctx-size 65536 \
     --n-gpu-layers 99 \
     > /tmp/llama-server.log 2>&1 &
   LLAMA_PID=$!
@@ -162,8 +164,8 @@ if candidates:
 
 # --- Backend: LM Studio ---
 elif [[ "$BACKEND" == "lmstudio" ]]; then
-  LCC_HOST="${LCC_HOST:-127.0.0.1}"
-  LCC_PORT="${LCC_PORT:-1234}"
+  LCC_HOST="${CLI_HOST:-127.0.0.1}"
+  LCC_PORT="${CLI_PORT:-1234}"
   BASE_URL="http://${LCC_HOST}:${LCC_PORT}"
 
   if ! curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
@@ -207,8 +209,8 @@ elif [[ "$BACKEND" == "remote-llama" ]]; then
   REMOTE_SSH_HOST="${REMOTE_SSH_HOST:?Set REMOTE_SSH_HOST to the SSH hostname of the remote machine}"
   REMOTE_MODELS_DIR="${REMOTE_MODELS_DIR:?Set REMOTE_MODELS_DIR to the GGUF directory on the remote host}"
   REMOTE_LLAMA_DIR="${REMOTE_LLAMA_DIR:?Set REMOTE_LLAMA_DIR to the llama-server directory on the remote host (WSL2 path)}"
-  LLAMA_PORT="${LCC_PORT:-8091}"
-  LCC_HOST="${LCC_HOST:?Set LCC_HOST to the remote host IP reachable from this machine}"
+  LLAMA_PORT="${CLI_PORT:-${LCC_PORT:-8091}}"
+  LCC_HOST="${CLI_HOST:-${LCC_HOST:?Set LCC_HOST to the remote host IP reachable from this machine}}"
   BASE_URL="http://${LCC_HOST}:${LLAMA_PORT}"
 
   # List GGUF models on remote host
@@ -294,49 +296,78 @@ if candidates:
     DRAFT_ARGS="--model-draft \"${DRAFT_WIN}\" --draft-max 16"
   fi
 
-  # Stop any existing llama-server on the remote host
-  if curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
-    echo "llama-server already running on ${BASE_URL}, stopping..." >&2
-    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
-      "pkill -f 'llama-server.*--port ${LLAMA_PORT}'" 2>/dev/null || true
-    sleep 2
-  fi
+  # --- Start remote llama-server (with automatic draft-model fallback) ---
+  start_remote_server() {
+    local draft_args="$1"
 
-  echo "Starting llama-server on ${REMOTE_SSH_HOST} with: ${MODEL_NAME}" >&2
-
-  # Start llama-server on the remote host via SSH
-  ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "
-    cd '${REMOTE_LLAMA_DIR}' && \
-    nohup ./llama-server.exe \
-      --model \"${GGUF_WIN}\" \
-      ${DRAFT_ARGS} \
-      --port ${LLAMA_PORT} \
-      --host 0.0.0.0 \
-      --ctx-size 32768 \
-      --n-gpu-layers 99 \
-      > /tmp/llama-server.log 2>&1 &
-    echo \$!
-  " > /tmp/remote-llama-pid.txt 2>/dev/null
-
-  REMOTE_PID=$(cat /tmp/remote-llama-pid.txt | tr -d '[:space:]')
-
-  # Kill remote llama-server when this script exits
-  trap "echo 'Stopping remote llama-server...' >&2; ssh -o ConnectTimeout=5 '$REMOTE_SSH_HOST' 'kill $REMOTE_PID 2>/dev/null; pkill -f \"llama-server.*--port ${LLAMA_PORT}\" 2>/dev/null' || true" EXIT
-
-  # Wait for server to be ready
-  echo "Waiting for server..." >&2
-  for i in $(seq 1 60); do
+    # Stop any existing llama-server on the remote host
     if curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
-      break
+      echo "llama-server already running on ${BASE_URL}, stopping..." >&2
+      ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
+        "pkill -f 'llama-server.*--port ${LLAMA_PORT}'" 2>/dev/null || true
+      sleep 2
     fi
-    sleep 1
-  done
 
-  if ! curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
-    echo "Error: remote llama-server did not respond after 60s." >&2
-    echo "Remote log:" >&2
-    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "tail -20 /tmp/llama-server.log" 2>/dev/null >&2
-    exit 1
+    echo "Starting llama-server on ${REMOTE_SSH_HOST} with: ${MODEL_NAME}" >&2
+
+    # Clear log so we don't detect errors from a previous run
+    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "rm -f /tmp/llama-server.log" 2>/dev/null
+
+    ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "
+      cd '${REMOTE_LLAMA_DIR}' && \
+      nohup ./llama-server.exe \
+        --model \"${GGUF_WIN}\" \
+        ${draft_args} \
+        --port ${LLAMA_PORT} \
+        --host 0.0.0.0 \
+        --ctx-size 65536 \
+        --n-gpu-layers 99 \
+        > /tmp/llama-server.log 2>&1 &
+      echo \$!
+    " > /tmp/remote-llama-pid.txt 2>/dev/null
+
+    REMOTE_PID=$(cat /tmp/remote-llama-pid.txt | tr -d '[:space:]')
+
+    # Kill remote llama-server when this script exits
+    trap "echo 'Stopping remote llama-server...' >&2; ssh -o ConnectTimeout=5 '$REMOTE_SSH_HOST' 'kill $REMOTE_PID 2>/dev/null; pkill -f \"llama-server.*--port ${LLAMA_PORT}\" 2>/dev/null' || true" EXIT
+
+    echo "Waiting for server..." >&2
+    # Give the server a few seconds to either crash or begin loading
+    sleep 5
+    # Check once if the server already crashed with a loading error
+    if ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
+      "grep -q 'exiting due to' /tmp/llama-server.log 2>/dev/null"; then
+      echo "Server crashed during startup." >&2
+      return 1
+    fi
+    for i in $(seq 1 55); do
+      if curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  }
+
+  if ! start_remote_server "$DRAFT_ARGS"; then
+    if [[ -n "$DRAFT_ARGS" ]]; then
+      echo "Server failed to start with draft model. Retrying without speculative decoding..." >&2
+      ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" \
+        "pkill -f 'llama-server.*--port ${LLAMA_PORT}'" 2>/dev/null || true
+      sleep 2
+      DRAFT_ARGS=""
+      if ! start_remote_server ""; then
+        echo "Error: remote llama-server did not respond after 60s." >&2
+        echo "Remote log:" >&2
+        ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "tail -20 /tmp/llama-server.log" 2>/dev/null >&2
+        exit 1
+      fi
+    else
+      echo "Error: remote llama-server did not respond after 60s." >&2
+      echo "Remote log:" >&2
+      ssh -o ConnectTimeout=5 "$REMOTE_SSH_HOST" "tail -20 /tmp/llama-server.log" 2>/dev/null >&2
+      exit 1
+    fi
   fi
 
   # Get the actual model ID from the API
@@ -355,8 +386,8 @@ if models:
 
 # --- Backend: remote (connect to an existing llama.cpp / OpenAI-compatible server) ---
 elif [[ "$BACKEND" == "remote" ]]; then
-  LCC_HOST="${LCC_HOST:-127.0.0.1}"
-  LCC_PORT="${LCC_PORT:-8091}"
+  LCC_HOST="${CLI_HOST:-${LCC_HOST:-127.0.0.1}}"
+  LCC_PORT="${CLI_PORT:-${LCC_PORT:-8091}}"
   BASE_URL="http://${LCC_HOST}:${LCC_PORT}"
 
   if ! curl -sf "${BASE_URL}/v1/models" > /dev/null 2>&1; then

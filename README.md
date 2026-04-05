@@ -23,7 +23,7 @@ The script:
 1. Queries the server's `/v1/models` endpoint (or lists remote GGUF files via SSH)
 2. Lets you pick a model (or auto-selects if only one is loaded)
 3. For llama.cpp backends: auto-starts `llama-server` (locally or via SSH) and kills it on exit
-4. For llama.cpp backends: auto-detects the smallest same-family model for [speculative decoding](https://github.com/ggml-org/llama.cpp/blob/master/examples/speculative/README.md)
+4. For llama.cpp backends: auto-detects the smallest same-family model for [speculative decoding](https://github.com/ggml-org/llama.cpp/blob/master/examples/speculative/README.md) (with automatic fallback if the draft model is incompatible)
 5. Launches `claude` with the right environment
 
 ## Prerequisites
@@ -114,8 +114,8 @@ All settings are via environment variables — no config files needed.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LCC_HOST` | `127.0.0.1` | Server host (used by `lmstudio`, `remote`, `remote-llama`) |
-| `LCC_PORT` | `1234` | Server port (`lmstudio` default; `remote`/`remote-llama` default: `8091`) |
+| `LCC_HOST` | — | Remote server host IP (used by `remote` and `remote-llama` backends only) |
+| `LCC_PORT` | `8091` | Remote server port (`remote` and `remote-llama` backends) |
 | `LLAMA_PORT` | `8090` | llama.cpp local server port |
 | `LLAMA_SERVER` | `~/git/llama.cpp/build/bin/llama-server` | Path to llama-server binary |
 | `MODELS_DIR` | `~/Models/gguf` | Directory containing .gguf model files |
@@ -128,7 +128,7 @@ All settings are via environment variables — no config files needed.
 
 ```bash
 # Use a remote LM Studio server
-LCC_HOST=192.168.0.62 local-claude
+local-claude --host 192.168.0.62
 
 # Use a specific draft model
 LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend llama
@@ -226,7 +226,7 @@ Large models (e.g., 14B+) are often split into multiple `.gguf` files. The scrip
 
 ### Context size
 
-Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size 32768`. If you encounter "exceeds context size" errors, increase this value in the script. Larger context = more RAM/VRAM usage.
+Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size 65536`. If you encounter "exceeds context size" errors, increase this value in the script. Larger context = more RAM/VRAM usage.
 
 ## Troubleshooting
 
@@ -238,6 +238,7 @@ Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size
 | Remote server not responding | Check SSH connectivity, firewall rules, and that the port is not in use |
 | Port already in use | Another service may be using the port. Try a different `LCC_PORT` |
 | Speculative decoding not activating | Ensure draft model is same family (e.g., both Qwen2.5). Check script output for "Draft model" line |
+| Draft model fails to load | Some model pairs are incompatible in certain llama.cpp versions (`invalid vector subscript`). The script retries without speculative decoding automatically |
 | LM Studio speculative decoding error | Disable it in LM Studio's model settings — it conflicts with MLX batched inference |
 | Model too slow | Use a smaller quantization or smaller model. 7B Q8_0 + 0.5B draft is a good sweet spot |
 | CUDA not loading on remote Windows | Ensure CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`) are in the same directory as `llama-server.exe` |
