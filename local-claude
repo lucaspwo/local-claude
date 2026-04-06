@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # local-claude — wrapper to run Claude Code with local LLMs
-# Usage: local-claude [--backend lmstudio|llama|remote|remote-llama] [--host HOST] [--port PORT] [claude arguments...]
+# Usage: local-claude [--backend lmstudio|llama|remote|remote-llama|apfel] [--host HOST] [--port PORT] [claude arguments...]
 #
 # Backends:
 #   lmstudio      — connects to a running LM Studio server (default port 1234)
 #   llama         — starts llama-server with an interactively chosen GGUF model
 #   remote        — connects to an already-running remote OpenAI-compatible server
 #   remote-llama  — starts llama-server on a remote host via SSH, manages lifecycle
+#   apfel         — starts apfel server for Apple Intelligence (macOS 26+, Apple Silicon)
 #
 # Environment variables:
 #   LCC_HOST        — remote server host IP (used by remote/remote-llama backends)
@@ -18,6 +19,8 @@
 #   REMOTE_SSH_HOST    — SSH host for remote-llama backend (required)
 #   REMOTE_MODELS_DIR  — GGUF directory on the remote host (required)
 #   REMOTE_LLAMA_DIR   — llama-server directory on the remote host (required for WSL2)
+#   APFEL_PORT         — apfel server port (default: 11434)
+#   APFEL_ARGS         — extra arguments to pass to apfel --serve
 
 set -euo pipefail
 
@@ -425,9 +428,103 @@ else:
   echo "Server: ${BASE_URL} (remote)"
   echo "---"
 
+# --- Backend: apfel (Apple Intelligence via FoundationModels) ---
+elif [[ "$BACKEND" == "apfel" ]]; then
+  if ! command -v apfel &>/dev/null; then
+    echo "Error: apfel not found. Install with: brew tap Arthur-Ficial/tap && brew install apfel" >&2
+    exit 1
+  fi
+
+  APFEL_PORT="${APFEL_PORT:-11434}"
+  APFEL_URL="http://127.0.0.1:${APFEL_PORT}"
+  PROXY_PORT="${CLI_PORT:-11435}"
+  PROXY_DIR="$(cd "$(dirname "$0")" && pwd)"
+  PROXY_SCRIPT="${PROXY_DIR}/apfel-proxy.py"
+
+  if [[ ! -f "$PROXY_SCRIPT" ]]; then
+    # Fallback: check next to the repo script
+    PROXY_SCRIPT="${HOME}/git/local-claude/apfel-proxy.py"
+  fi
+  if [[ ! -f "$PROXY_SCRIPT" ]]; then
+    echo "Error: apfel-proxy.py not found" >&2
+    exit 1
+  fi
+
+  # Start apfel server if not already running
+  if curl -sf "${APFEL_URL}/v1/models" > /dev/null 2>&1; then
+    echo "apfel server already running on ${APFEL_URL}" >&2
+  else
+    echo "Starting apfel server on port ${APFEL_PORT}..." >&2
+    apfel --serve --port "$APFEL_PORT" ${APFEL_ARGS:-} > /tmp/apfel-server.log 2>&1 &
+    APFEL_PID=$!
+
+    echo "Waiting for apfel..." >&2
+    for i in $(seq 1 30); do
+      if curl -sf "${APFEL_URL}/v1/models" > /dev/null 2>&1; then
+        break
+      fi
+      if ! kill -0 "$APFEL_PID" 2>/dev/null; then
+        echo "Error: apfel exited unexpectedly. Log:" >&2
+        tail -20 /tmp/apfel-server.log >&2
+        exit 1
+      fi
+      sleep 1
+    done
+
+    if ! curl -sf "${APFEL_URL}/v1/models" > /dev/null 2>&1; then
+      echo "Error: apfel did not respond after 30s. Log:" >&2
+      tail -20 /tmp/apfel-server.log >&2
+      exit 1
+    fi
+  fi
+
+  # Start Anthropic→OpenAI proxy (Claude Code speaks /v1/messages, apfel speaks /v1/chat/completions)
+  echo "Starting API proxy on port ${PROXY_PORT}..." >&2
+  python3 "$PROXY_SCRIPT" --port "$PROXY_PORT" --upstream "$APFEL_URL" > /tmp/apfel-proxy.log 2>&1 &
+  PROXY_PID=$!
+
+  # Kill both apfel and proxy on exit
+  cleanup_apfel() {
+    kill "$PROXY_PID" 2>/dev/null
+    wait "$PROXY_PID" 2>/dev/null
+    if [[ -n "${APFEL_PID:-}" ]]; then
+      kill "$APFEL_PID" 2>/dev/null
+      wait "$APFEL_PID" 2>/dev/null
+    fi
+  }
+  trap cleanup_apfel EXIT
+
+  # Wait for proxy to be ready
+  for i in $(seq 1 10); do
+    if curl -sf "http://127.0.0.1:${PROXY_PORT}/v1/models" > /dev/null 2>&1; then
+      break
+    fi
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+      echo "Error: proxy exited unexpectedly. Log:" >&2
+      tail -20 /tmp/apfel-proxy.log >&2
+      exit 1
+    fi
+    sleep 0.5
+  done
+
+  BASE_URL="http://127.0.0.1:${PROXY_PORT}"
+  MODEL="apple-foundationmodel"
+  export ANTHROPIC_CUSTOM_MODEL_OPTION="$MODEL"
+  export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="Apple Intelligence"
+  export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION="Apple on-device model via apfel (macOS 26+)"
+  # Force all internal models (haiku for fast tasks) to use the same model
+  export ANTHROPIC_SMALL_FAST_MODEL="$MODEL"
+  # Apple Intelligence has a 4096-token context window — too small for Claude Code's
+  # full system prompt and tool schemas. Use --bare for minimal prompt and --tools ""
+  # to disable tool schemas (the proxy strips them anyway).
+  EXTRA_CLAUDE_ARGS=(--bare --tools "" --system-prompt "You are a helpful coding assistant. Be concise.")
+  echo "Model: Apple Intelligence (via apfel)"
+  echo "Server: ${APFEL_URL} → proxy ${BASE_URL}"
+  echo "---"
+
 else
   echo "Unknown backend: $BACKEND" >&2
-  echo "Usage: local-claude [--backend lmstudio|llama|remote] [--host HOST] [--port PORT]" >&2
+  echo "Usage: local-claude [--backend lmstudio|llama|remote|remote-llama|apfel] [--host HOST] [--port PORT]" >&2
   exit 1
 fi
 
@@ -441,9 +538,9 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export CLAUDE_CONFIG_DIR="${HOME}/.claude-local"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
-if [[ -n "${LLAMA_PID:-}" || -n "${REMOTE_PID:-}" ]]; then
-  # Don't exec — keep bash alive so the EXIT trap can kill llama-server
-  claude --model "$MODEL" "$@"
+if [[ -n "${LLAMA_PID:-}" || -n "${REMOTE_PID:-}" || -n "${APFEL_PID:-}" || -n "${PROXY_PID:-}" ]]; then
+  # Don't exec — keep bash alive so the EXIT trap can kill managed processes
+  claude --model "$MODEL" ${EXTRA_CLAUDE_ARGS[@]+"${EXTRA_CLAUDE_ARGS[@]}"} "$@"
 else
-  exec claude --model "$MODEL" "$@"
+  exec claude --model "$MODEL" ${EXTRA_CLAUDE_ARGS[@]+"${EXTRA_CLAUDE_ARGS[@]}"} "$@"
 fi

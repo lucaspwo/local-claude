@@ -1,10 +1,10 @@
 # local-claude
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with local LLMs instead of the Anthropic API. Keeps the default `claude` command untouched — use `local-claude` when you want to go fully offline, or offload inference to a remote GPU.
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with local LLMs instead of the Anthropic API. Keeps the default `claude` command untouched — use `local-claude` when you want to go fully offline, offload inference to a remote GPU, or experiment with Apple Intelligence on-device.
 
 ## Why
 
-Claude Code is an excellent coding agent, but it requires an Anthropic API subscription. This wrapper redirects it to a local or remote inference server (LM Studio, llama.cpp, or a remote llama.cpp via SSH) so you can experiment with open-weight models at zero cost.
+Claude Code is an excellent coding agent, but it requires an Anthropic API subscription. This wrapper redirects it to a local or remote inference server (LM Studio, llama.cpp, a remote llama.cpp via SSH, or Apple Intelligence via [apfel](https://github.com/Arthur-Ficial/apfel)) so you can experiment with open-weight models at zero cost.
 
 The default `claude` command remains unchanged — your cloud subscription is never affected.
 
@@ -34,6 +34,7 @@ The script:
   - [LM Studio](https://lmstudio.ai/) with local server enabled
   - [llama.cpp](https://github.com/ggml-org/llama.cpp) built with `llama-server`
   - A remote machine with llama.cpp and SSH access (for `remote-llama` backend)
+  - [apfel](https://github.com/Arthur-Ficial/apfel) for Apple Intelligence (macOS 26+, Apple Silicon)
 
 ## Install
 
@@ -42,8 +43,8 @@ The script:
 git clone https://github.com/lucaspwo/local-claude.git
 cd local-claude
 
-# Copy script to PATH
-cp local-claude ~/.local/bin/
+# Copy scripts to PATH
+cp local-claude apfel-proxy.py ~/.local/bin/
 chmod +x ~/.local/bin/local-claude
 ```
 
@@ -77,6 +78,17 @@ local-claude --backend remote-llama
 
 This is ideal for using a lightweight laptop (e.g., MacBook) as a client while a more powerful machine (e.g., a PC with an NVIDIA RTX GPU) handles inference.
 
+### With Apple Intelligence (macOS 26+)
+
+Uses Apple's on-device foundation model via [apfel](https://github.com/Arthur-Ficial/apfel). Requires Apple Silicon, macOS 26 Tahoe, and Apple Intelligence enabled.
+
+```bash
+brew tap Arthur-Ficial/tap && brew install apfel
+local-claude --backend apfel
+```
+
+> **Important limitations:** Apple Intelligence has a **4096-token context window** — far too small for Claude Code's tool schemas and system prompt. The backend runs in **chat-only mode** (`--bare --tools ""`): you can have conversations, but the agent cannot use tools (edit files, run commands, etc.). A lightweight proxy (`apfel-proxy.py`) translates between the Anthropic Messages API that Claude Code speaks and the OpenAI Chat Completions API that apfel exposes.
+
 ### With a pre-running remote server
 
 If you prefer to manage the remote server yourself, use the `remote` backend to connect to any already-running OpenAI-compatible server:
@@ -92,6 +104,7 @@ local-claude --backend remote --host 192.168.1.100 --port 8091
 alias sl='local-claude'                                # LM Studio
 alias sllama='local-claude --backend llama'            # llama.cpp (local)
 alias sremote='local-claude --backend remote-llama'    # llama.cpp (remote via SSH)
+alias sapfel='local-claude --backend apfel'            # Apple Intelligence
 
 # With SpecStory session recording
 alias slocal='specstory run claude -c local-claude --no-cloud-sync'
@@ -107,6 +120,7 @@ alias sremote='specstory run claude -c "local-claude --backend remote-llama" --n
 | `llama` | Starts/stops local `llama-server` | Local inference with llama.cpp |
 | `remote-llama` | Starts/stops `llama-server` on remote host via SSH | Offload to a remote GPU |
 | `remote` | Connects to any running server | Manual server management |
+| `apfel` | Starts apfel + API proxy | Apple Intelligence on-device (chat only) |
 
 ## Configuration
 
@@ -120,6 +134,8 @@ All settings are via environment variables — no config files needed.
 | `LLAMA_SERVER` | `~/git/llama.cpp/build/bin/llama-server` | Path to llama-server binary |
 | `MODELS_DIR` | `~/Models/gguf` | Directory containing .gguf model files |
 | `LLAMA_DRAFT` | *(auto-detected)* | Explicit path to draft model for speculative decoding |
+| `APFEL_PORT` | `11434` | apfel server port |
+| `APFEL_ARGS` | — | Extra arguments for `apfel --serve` (e.g., `--cors --max-concurrent 5`) |
 | `REMOTE_SSH_HOST` | *(required)* | SSH host for `remote-llama` backend |
 | `REMOTE_MODELS_DIR` | *(required)* | GGUF directory on the remote host (WSL2 path, e.g., `/mnt/d/Models/gguf`) |
 | `REMOTE_LLAMA_DIR` | *(required)* | llama-server directory on the remote host (WSL2 path, e.g., `/mnt/c/llama.cpp/bin`) |
@@ -240,6 +256,9 @@ Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size
 | Speculative decoding not activating | Ensure draft model is same family (e.g., both Qwen2.5). Check script output for "Draft model" line |
 | Draft model fails to load | Some model pairs are incompatible in certain llama.cpp versions (`invalid vector subscript`). The script retries without speculative decoding automatically |
 | LM Studio speculative decoding error | Disable it in LM Studio's model settings — it conflicts with MLX batched inference |
+| apfel "context_length_exceeded" | Apple Intelligence has a hard 4096-token limit. The backend already uses `--bare --tools ""` to minimize context. Keep messages short |
+| apfel proxy connection refused | The apfel server crashed (known issue with FoundationModels framework). Restart with `local-claude --backend apfel` |
+| apfel "model does not exist" | The proxy should rewrite all model names. Check `/tmp/apfel-proxy.log` for details |
 | Model too slow | Use a smaller quantization or smaller model. 7B Q8_0 + 0.5B draft is a good sweet spot |
 | CUDA not loading on remote Windows | Ensure CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`) are in the same directory as `llama-server.exe` |
 
