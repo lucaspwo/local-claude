@@ -137,9 +137,9 @@ All settings are via environment variables — no config files needed.
 | `APFEL_PORT` | `11434` | apfel server port |
 | `APFEL_ARGS` | — | Extra arguments for `apfel --serve` (e.g., `--cors --max-concurrent 5`) |
 | `REMOTE_SSH_HOST` | *(required)* | SSH host for `remote-llama` backend |
-| `REMOTE_MODELS_DIR` | *(required)* | Absolute path to GGUF directory on the remote host (e.g., `/home/<user>/Models/gguf`) |
-| `REMOTE_LLAMA_DIR` | *(required)* | Absolute path to llama-server directory on the remote host (e.g., `/home/<user>/llama.cpp/build/bin`) |
-| `REMOTE_LLAMA_TQ3_DIR` | *(required with `--tq3`)* | Absolute path to llama-server directory for the TQ3 fork on the remote host |
+| `REMOTE_MODELS_DIR` | *(required)* | Absolute path to GGUF directory on the remote host (e.g., `/home/<user>/models/gguf`) |
+| `REMOTE_LLAMA_DIR` | *(required)* | Absolute path to llama-server directory on the remote host (e.g., `/home/<user>/git/llama.cpp/build/bin`) |
+| `REMOTE_LLAMA_TQ3_DIR` | *(required with `--tq3`)* | Absolute path to llama-server directory for the TQ3 fork (e.g., `/home/<user>/git/llama.cpp-tq3/build/bin`) |
 | `LLAMA_CTX_SIZE` | `65536` (or `32768` with `--tq3`) | Context size for `llama` and `remote-llama` backends |
 
 ### Examples
@@ -153,8 +153,8 @@ LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend
 
 # Remote llama.cpp via SSH (all 4 vars are required)
 REMOTE_SSH_HOST=myserver \
-REMOTE_MODELS_DIR=/home/lucas/Models/gguf \
-REMOTE_LLAMA_DIR=/home/lucas/llama.cpp/build/bin \
+REMOTE_MODELS_DIR=/home/lucas/models/gguf \
+REMOTE_LLAMA_DIR=/home/lucas/git/llama.cpp/build/bin \
 LCC_HOST=192.0.2.5 \
 local-claude --backend remote-llama
 
@@ -288,13 +288,13 @@ Test: `ssh my-remote-pc "uname -a"` — should show a Linux kernel.
 
 ### 2. Install the NVIDIA driver and CUDA toolkit
 
-Unlike the Windows release, llama.cpp publishes no prebuilt Ubuntu+CUDA binary, so we need both the driver *and* the CUDA toolkit (used at build time).
+llama.cpp publishes no prebuilt Ubuntu+CUDA binary, so we need both the driver *and* the CUDA toolkit (used at build time).
 
 ```bash
-# Driver
+# Driver — pick the recommended one for the GPU
 sudo ubuntu-drivers install
-# Or pin a specific version (CUDA 12.x needs driver ≥ 545):
-sudo apt install -y nvidia-driver-550
+# Or pin a specific version (CUDA 13.x needs driver ≥ 580; CUDA 12.x needs ≥ 545):
+sudo apt install -y nvidia-driver-580
 
 sudo reboot
 ```
@@ -313,7 +313,7 @@ Install the CUDA toolkit. Easiest path is NVIDIA's apt repo (more recent than `n
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
-sudo apt install -y cuda-toolkit-12-6   # Or another 12.x version
+sudo apt install -y cuda-toolkit   # Pulls the latest available (13.x at time of writing)
 
 # Add to PATH (in ~/.bashrc):
 echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
@@ -329,8 +329,9 @@ nvcc --version   # Verify
 sudo apt install -y build-essential cmake git
 
 # Use absolute paths — ~ is not expanded over SSH
-git clone https://github.com/ggml-org/llama.cpp.git "$HOME/llama.cpp"
-cd "$HOME/llama.cpp"
+mkdir -p "$HOME/git"
+git clone https://github.com/ggml-org/llama.cpp.git "$HOME/git/llama.cpp"
+cd "$HOME/git/llama.cpp"
 
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j "$(nproc)"
@@ -342,25 +343,27 @@ ls -lh build/bin/llama-server
 Verify CUDA is wired in:
 
 ```bash
-"$HOME/llama.cpp/build/bin/llama-server" --help 2>&1 | head -5
+"$HOME/git/llama.cpp/build/bin/llama-server" --help 2>&1 | head -5
 # Should show: "ggml_cuda_init: found 1 CUDA devices"
 # If it only shows "load_backend: loaded CPU backend", CUDA wasn't detected at build time
 ```
 
-Set `REMOTE_LLAMA_DIR` to `/home/<user>/llama.cpp/build/bin` (where `llama-server` lives).
+Set `REMOTE_LLAMA_DIR` to `/home/<user>/git/llama.cpp/build/bin` (where `llama-server` lives).
 
 Create the models directory:
 
 ```bash
-mkdir -p "$HOME/Models/gguf"   # Or use a larger drive, e.g., /data/Models/gguf
+mkdir -p "$HOME/models/gguf"   # Or use a larger drive, e.g., /data/models/gguf
 ```
+
+> **Optional — TQ3 fork.** If you also want the [TQ3 quantization fork](https://github.com/turbo-tan/llama.cpp-tq3) (used by `local-claude --backend remote-llama --tq3`), clone and build it side-by-side as `$HOME/git/llama.cpp-tq3`, then set `REMOTE_LLAMA_TQ3_DIR` to its `build/bin` directory.
 
 ### 4. Download GGUF models
 
 Download models from [Hugging Face](https://huggingface.co/models?search=gguf). For Qwen2.5 with speculative decoding:
 
 ```bash
-MODELS="$HOME/Models/gguf"   # Adjust to your storage path
+MODELS="$HOME/models/gguf"   # Adjust to your storage path
 
 # Main model — Qwen2.5-7B-Instruct Q8_0 (~8 GB, fits in 16 GB VRAM)
 # Note: this model is split into 3 files, download ALL of them
@@ -393,10 +396,10 @@ On your local machine (the one running Claude Code), set the environment variabl
 
 ```bash
 # ~/.zshrc or ~/.bashrc
-export REMOTE_SSH_HOST="my-remote-pc"                 # SSH config host name
-export REMOTE_MODELS_DIR="/home/lucas/Models/gguf"    # absolute path on the remote host
-export REMOTE_LLAMA_DIR="/home/lucas/llama.cpp/build/bin"   # absolute path on the remote host
-export LCC_HOST="192.0.2.5"                           # IP of remote host (reachable from client)
+export REMOTE_SSH_HOST="my-remote-pc"                            # SSH config host name
+export REMOTE_MODELS_DIR="/home/lucas/models/gguf"               # absolute path on the remote host
+export REMOTE_LLAMA_DIR="/home/lucas/git/llama.cpp/build/bin"    # absolute path on the remote host
+export LCC_HOST="192.0.2.5"                                      # IP of remote host (reachable from client)
 ```
 
 Then run:
