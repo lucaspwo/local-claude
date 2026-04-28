@@ -94,7 +94,7 @@ local-claude --backend apfel
 If you prefer to manage the remote server yourself, use the `remote` backend to connect to any already-running OpenAI-compatible server:
 
 ```bash
-local-claude --backend remote --host 192.168.1.100 --port 8091
+local-claude --backend remote --host 192.0.2.100 --port 8091
 ```
 
 ### Shell aliases (optional)
@@ -144,7 +144,7 @@ All settings are via environment variables — no config files needed.
 
 ```bash
 # Use a remote LM Studio server
-local-claude --host 192.168.0.62
+local-claude --host 192.0.2.62
 
 # Use a specific draft model
 LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend llama
@@ -153,11 +153,11 @@ LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend
 REMOTE_SSH_HOST=myserver \
 REMOTE_MODELS_DIR=/mnt/d/Models/gguf \
 REMOTE_LLAMA_DIR=/mnt/c/llama.cpp/bin \
-LCC_HOST=10.0.0.5 \
+LCC_HOST=192.0.2.5 \
 local-claude --backend remote-llama
 
 # Connect to a pre-running remote server
-local-claude --backend remote --host 10.0.0.5 --port 8091
+local-claude --backend remote --host 192.0.2.5 --port 8091
 ```
 
 ## Speculative decoding
@@ -364,7 +364,7 @@ On your local machine (the one running Claude Code), set the environment variabl
 export REMOTE_SSH_HOST="my-remote-pc"               # SSH config host name
 export REMOTE_MODELS_DIR="/mnt/d/Models/gguf"        # WSL2 path to models on remote
 export REMOTE_LLAMA_DIR="/mnt/c/llama.cpp/bin"       # WSL2 path to llama-server on remote
-export LCC_HOST="10.0.0.5"                           # IP of remote host (reachable from client)
+export LCC_HOST="192.0.2.5"                           # IP of remote host (reachable from client)
 ```
 
 Then run:
