@@ -137,8 +137,10 @@ All settings are via environment variables — no config files needed.
 | `APFEL_PORT` | `11434` | apfel server port |
 | `APFEL_ARGS` | — | Extra arguments for `apfel --serve` (e.g., `--cors --max-concurrent 5`) |
 | `REMOTE_SSH_HOST` | *(required)* | SSH host for `remote-llama` backend |
-| `REMOTE_MODELS_DIR` | *(required)* | GGUF directory on the remote host (WSL2 path, e.g., `/mnt/d/Models/gguf`) |
-| `REMOTE_LLAMA_DIR` | *(required)* | llama-server directory on the remote host (WSL2 path, e.g., `/mnt/c/llama.cpp/bin`) |
+| `REMOTE_MODELS_DIR` | *(required)* | Absolute path to GGUF directory on the remote host (e.g., `/home/<user>/Models/gguf`) |
+| `REMOTE_LLAMA_DIR` | *(required)* | Absolute path to llama-server directory on the remote host (e.g., `/home/<user>/llama.cpp/build/bin`) |
+| `REMOTE_LLAMA_TQ3_DIR` | *(required with `--tq3`)* | Absolute path to llama-server directory for the TQ3 fork on the remote host |
+| `LLAMA_CTX_SIZE` | `65536` (or `32768` with `--tq3`) | Context size for `llama` and `remote-llama` backends |
 
 ### Examples
 
@@ -151,8 +153,8 @@ LLAMA_DRAFT=~/Models/gguf/qwen2.5-0.5b-instruct-q8_0.gguf local-claude --backend
 
 # Remote llama.cpp via SSH (all 4 vars are required)
 REMOTE_SSH_HOST=myserver \
-REMOTE_MODELS_DIR=/mnt/d/Models/gguf \
-REMOTE_LLAMA_DIR=/mnt/c/llama.cpp/bin \
+REMOTE_MODELS_DIR=/home/lucas/Models/gguf \
+REMOTE_LLAMA_DIR=/home/lucas/llama.cpp/build/bin \
 LCC_HOST=192.0.2.5 \
 local-claude --backend remote-llama
 
@@ -227,11 +229,9 @@ For `lmstudio` and `remote`, the script uses `exec claude` since there's no serv
 
 The `remote-llama` backend expects:
 - SSH access to the remote host (configured in `~/.ssh/config` or via `REMOTE_SSH_HOST`)
-- `llama-server` binary on the remote host
-- GGUF model files in `REMOTE_MODELS_DIR` on the remote host
+- `llama-server` binary (Linux) on the remote host
+- GGUF model files in `REMOTE_MODELS_DIR` on the remote host (use absolute paths — `~` is not expanded over SSH)
 - The remote server listens on `0.0.0.0` so it's accessible from the network
-
-For a Windows host with WSL2, the script SSHs into WSL2, runs `llama-server.exe` (the Windows binary) with Windows-style paths, and converts paths automatically.
 
 ### Split GGUF support
 
@@ -260,75 +260,107 @@ Claude Code's system prompt uses ~27K tokens. The script defaults to `--ctx-size
 | apfel proxy connection refused | The apfel server crashed (known issue with FoundationModels framework). Restart with `local-claude --backend apfel` |
 | apfel "model does not exist" | The proxy should rewrite all model names. Check `/tmp/apfel-proxy.log` for details |
 | Model too slow | Use a smaller quantization or smaller model. 7B Q8_0 + 0.5B draft is a good sweet spot |
-| CUDA not loading on remote Windows | Ensure CUDA runtime DLLs (`cudart64_*.dll`, `cublas64_*.dll`) are in the same directory as `llama-server.exe` |
+| CUDA not loading on remote host | Run `nvidia-smi` over SSH. If it fails, the NVIDIA driver isn't installed or the user can't access it. Prebuilt llama.cpp Linux binaries bundle the CUDA runtime — only the driver is required |
 
-## Setting up a remote Windows host with NVIDIA GPU
+## Setting up a remote Ubuntu Server host with NVIDIA GPU
 
-Complete step-by-step guide to set up a Windows PC as a remote llama.cpp inference server. This was tested with an NVIDIA RTX 4070 Ti SUPER (16 GB VRAM) and Qwen2.5 models.
+Complete step-by-step guide to set up an Ubuntu Server PC as a remote llama.cpp inference server. This was tested with an NVIDIA RTX 4070 Ti SUPER (16 GB VRAM) and Qwen2.5 models.
 
 ### 1. Enable SSH access
 
-The `remote-llama` backend SSHes into **WSL2** on the Windows host (not native Windows SSH), because it needs to run `llama-server.exe` from a Unix shell while passing Windows-style paths.
-
-- Install WSL2 on the Windows host: `wsl --install` (from an admin PowerShell)
-- Install an SSH server inside WSL2: `sudo apt install openssh-server`
-- Start the SSH server: `sudo service ssh start`
-- Configure it to listen on a different port (e.g., 2222) to avoid conflict with Windows' own SSH:
-  ```bash
-  # In WSL2: edit /etc/ssh/sshd_config, set Port 2222
-  sudo service ssh restart
-  ```
-- On the client machine, add an entry to `~/.ssh/config`:
-  ```
-  Host my-remote-pc
-    HostName <IP or Tailscale address>
-    Port 2222
-    User <wsl-username>
-    IdentityFile ~/.ssh/id_ed25519
-  ```
-- Test: `ssh my-remote-pc "uname -a"` — should show a Linux kernel
-
-### 2. Download llama.cpp (prebuilt, no compilation needed)
-
-From the WSL2 shell on the remote host, or via SSH:
+Ubuntu Server ships with `openssh-server` enabled by default. If not:
 
 ```bash
-# Create directories
-mkdir -p /mnt/c/llama.cpp/bin
-mkdir -p /mnt/d/Models/gguf   # Use a drive with enough space
-
-# Download latest release (check https://github.com/ggml-org/llama.cpp/releases)
-VERSION="b8668"  # Replace with latest
-cd /tmp
-
-# Main binary (CUDA 12.4 — works with most modern NVIDIA drivers)
-wget "https://github.com/ggml-org/llama.cpp/releases/latest/download/llama-${VERSION}-bin-win-cuda-12.4-x64.zip"
-
-# CUDA runtime DLLs (required — not included in the main binary)
-wget "https://github.com/ggml-org/llama.cpp/releases/latest/download/cudart-llama-bin-win-cuda-12.4-x64.zip"
-
-# Extract BOTH to the SAME directory
-cd /mnt/c/llama.cpp/bin
-unzip /tmp/llama-${VERSION}-bin-win-cuda-12.4-x64.zip
-unzip /tmp/cudart-llama-bin-win-cuda-12.4-x64.zip
+sudo apt update && sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
 ```
 
-> **Critical:** You must extract **both** zips to the same directory. The main binary contains `ggml-cuda.dll` but it depends on `cudart64_12.dll`, `cublas64_12.dll`, and `cublasLt64_12.dll` from the cudart zip. Without them, llama-server silently falls back to CPU-only inference.
+On the client machine, add an entry to `~/.ssh/config`:
 
-Verify CUDA is detected:
+```
+Host my-remote-pc
+  HostName <IP or Tailscale address>
+  User <username>
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+Test: `ssh my-remote-pc "uname -a"` — should show a Linux kernel.
+
+### 2. Install the NVIDIA driver and CUDA toolkit
+
+Unlike the Windows release, llama.cpp publishes no prebuilt Ubuntu+CUDA binary, so we need both the driver *and* the CUDA toolkit (used at build time).
+
 ```bash
-cd /mnt/c/llama.cpp/bin
-./llama-server.exe --help 2>&1 | head -5
+# Driver
+sudo ubuntu-drivers install
+# Or pin a specific version (CUDA 12.x needs driver ≥ 545):
+sudo apt install -y nvidia-driver-550
+
+sudo reboot
+```
+
+After reboot, verify the driver:
+
+```bash
+nvidia-smi
+# Should show the GPU model and driver version
+```
+
+Install the CUDA toolkit. Easiest path is NVIDIA's apt repo (more recent than `nvidia-cuda-toolkit` from Ubuntu's archive):
+
+```bash
+# https://developer.nvidia.com/cuda-downloads — pick "deb (network)" for your Ubuntu version
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+sudo apt install -y cuda-toolkit-12-6   # Or another 12.x version
+
+# Add to PATH (in ~/.bashrc):
+echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+source ~/.bashrc
+
+nvcc --version   # Verify
+```
+
+### 3. Build llama.cpp with CUDA support
+
+```bash
+sudo apt install -y build-essential cmake git
+
+# Use absolute paths — ~ is not expanded over SSH
+git clone https://github.com/ggml-org/llama.cpp.git "$HOME/llama.cpp"
+cd "$HOME/llama.cpp"
+
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j "$(nproc)"
+
+# The binary lands in build/bin/
+ls -lh build/bin/llama-server
+```
+
+Verify CUDA is wired in:
+
+```bash
+"$HOME/llama.cpp/build/bin/llama-server" --help 2>&1 | head -5
 # Should show: "ggml_cuda_init: found 1 CUDA devices"
-# If it only shows "load_backend: loaded CPU backend", the CUDA DLLs are missing
+# If it only shows "load_backend: loaded CPU backend", CUDA wasn't detected at build time
 ```
 
-### 3. Download GGUF models
+Set `REMOTE_LLAMA_DIR` to `/home/<user>/llama.cpp/build/bin` (where `llama-server` lives).
+
+Create the models directory:
+
+```bash
+mkdir -p "$HOME/Models/gguf"   # Or use a larger drive, e.g., /data/Models/gguf
+```
+
+### 4. Download GGUF models
 
 Download models from [Hugging Face](https://huggingface.co/models?search=gguf). For Qwen2.5 with speculative decoding:
 
 ```bash
-MODELS=/mnt/d/Models/gguf  # Adjust to your drive
+MODELS="$HOME/Models/gguf"   # Adjust to your storage path
 
 # Main model — Qwen2.5-7B-Instruct Q8_0 (~8 GB, fits in 16 GB VRAM)
 # Note: this model is split into 3 files, download ALL of them
@@ -353,33 +385,34 @@ for i in 1 2 3; do
 done
 ```
 
-> **Tip:** Keep llama.cpp binaries on the fastest SSD (for DLL loading), but models can live on a slower drive — they're read sequentially into VRAM at startup and not accessed from disk again.
+> **Tip:** Keep llama.cpp binaries on a fast SSD, but models can live on a slower drive — they're read sequentially into VRAM at startup and not accessed from disk again.
 
-### 4. Configure the client
+### 5. Configure the client
 
 On your local machine (the one running Claude Code), set the environment variables. Best done in your shell profile:
 
 ```bash
 # ~/.zshrc or ~/.bashrc
-export REMOTE_SSH_HOST="my-remote-pc"               # SSH config host name
-export REMOTE_MODELS_DIR="/mnt/d/Models/gguf"        # WSL2 path to models on remote
-export REMOTE_LLAMA_DIR="/mnt/c/llama.cpp/bin"       # WSL2 path to llama-server on remote
+export REMOTE_SSH_HOST="my-remote-pc"                 # SSH config host name
+export REMOTE_MODELS_DIR="/home/lucas/Models/gguf"    # absolute path on the remote host
+export REMOTE_LLAMA_DIR="/home/lucas/llama.cpp/build/bin"   # absolute path on the remote host
 export LCC_HOST="192.0.2.5"                           # IP of remote host (reachable from client)
 ```
 
 Then run:
+
 ```bash
 local-claude --backend remote-llama
 ```
 
-### 5. Gotchas we discovered
+### 6. Gotchas we discovered
 
-- **Port 8090 may be in use** by Windows services (`svchost.exe`). The script defaults to **8091** to avoid this. If that's also taken, set `LCC_PORT` to another value.
-- **CUDA toolkit is NOT required.** The prebuilt binaries include everything needed. Only the NVIDIA display driver must be installed on the Windows host.
-- **WSL2 paths vs Windows paths:** The script converts automatically (e.g., `/mnt/d/Models/...` → `D:\Models\...`). You always use WSL2 paths in the env vars.
-- **Disk space:** Check free space before downloading models. A full C: drive causes `curl: (23) Failure writing output to destination` errors without clear explanation.
+- **Use absolute paths in `REMOTE_MODELS_DIR` / `REMOTE_LLAMA_DIR`.** The script passes these values inside single quotes over SSH, so `~` is **not expanded** on the remote side. Use `/home/<user>/...` (or wherever the data lives).
+- **Port 8090 collisions are rare on Ubuntu Server**, but the script still defaults to **8091**. If that's taken, set `LCC_PORT` to another value.
+- **CUDA toolkit is NOT required.** The prebuilt Linux binaries include the CUDA runtime. Only the NVIDIA display driver must be installed.
+- **Disk space:** Check free space before downloading models. A full disk causes `curl: (23) Failure writing output to destination` errors without clear explanation.
 - **Split GGUF files:** Some models (7B Q8_0, 14B Q4_K_M) are split into multiple files on Hugging Face. Download **all** parts. The script auto-detects them and only shows the model name once in the selection menu.
-- **Firewall:** Windows Firewall may block incoming connections to `llama-server.exe`. Allow it when prompted, or add a firewall rule for the port.
+- **Firewall:** if `ufw` is enabled, allow the port: `sudo ufw allow 8091/tcp`.
 
 ### VRAM sizing guide
 
