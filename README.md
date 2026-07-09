@@ -48,6 +48,18 @@ cp local-claude apfel-proxy.py ~/.local/bin/
 chmod +x ~/.local/bin/local-claude
 ```
 
+## Project structure
+
+```
+local-claude     Bash wrapper — entry point, backend detection/selection, launches `claude`
+apfel-proxy.py   Anthropic ↔ OpenAI translation proxy, used only by the `apfel` backend
+README.md        This file
+MANUTENCAO.md    Deep maintenance guide (Portuguese)
+AGENTS.md        Symbol map and conventions for LLM agents
+CLAUDE.md        Claude-Code-specific notes (Portuguese)
+LICENSE          MIT
+```
+
 ## Usage
 
 ### With LM Studio (default)
@@ -428,6 +440,12 @@ local-claude --backend remote-llama
 | 14B | Q8_0 | ~16 GB | Best 14B | ❌ | ⚠️ tight | ✅ |
 
 > The draft model (0.5B) adds ~0.7 GB on top. With a 7B Q8_0 + 0.5B draft, total VRAM is ~10 GB.
+
+## Related documentation
+
+- [MANUTENCAO.md](MANUTENCAO.md) — maintenance guide, architecture, key symbols (Portuguese)
+- [AGENTS.md](AGENTS.md) — file map, symbol index, commands for LLM agents
+- [CLAUDE.md](CLAUDE.md) — Claude-Code-specific notes (Portuguese)
 
 ## Credits
 
