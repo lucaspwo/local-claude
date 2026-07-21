@@ -28,6 +28,14 @@ Após editar o script, teste manualmente com o backend relevante — não há su
 - Arquitetura e receitas de mudança → [MANUTENCAO.md](MANUTENCAO.md)
 - Mapa de símbolos e comandos (para LLM/agente) → [AGENTS.md](AGENTS.md)
 
+## Manutenção destes docs
+
+Se sua mudança invalidar algo citado aqui ou nos docs irmãos — um comando, um
+símbolo, uma referência `arquivo:linha`, a estrutura de pastas — corrija a
+referência **no mesmo commit**. Não reescreva proativamente o que ainda está
+correto. Para um refresh completo, use a skill `/atualizando-docs-manutencao`
+(ela verifica cada ref com `git grep`).
+
 ## Commit/push
 
 O remote `origin` tem dois `pushurl` configurados: GitHub (`git@github.com:lucaspwo/local-claude.git`) e o GitLab do homelab (`ssh://git@gitlab.lab.lucaspwo.com:2222/lucaspwo/local-claude.git`). `git push` sem argumentos já envia para os dois. Se o homelab estiver inacessível (fora da Tailscale), o push para o GitHub ainda vai — re-tente o homelab depois.
